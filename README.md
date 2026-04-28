@@ -1,43 +1,28 @@
-# Hacky automated way to install OpenBSD on servetheworld.net / stw.no VPS
+# Fully Automatic OpenBSD installation for stw.no / servetheworld.net VPS
 
-The scripts in this repository automate installing OpenBSD on a hosttheworld.net / stw.no VPS.
+This repository automates installing OpenBSD on a servetheworld.net / stw.no x86 VPS.
 
+The current flow uses one local macOS shell script:
 
-## Note about OpenBSD on Proxmox, which stw.no uses to host VPS
+- `setup-openbsd.sh` flashes the OpenBSD installer image from the temporary Debian system, reboots the VPS, drives the browser noVNC installer with desktop automation, and hands off to OpenBSD `autoinstall`.
+- `templates/install.conf/*.conf` are OpenBSD autoinstall response files for the configured target hosts.
+- `install.sh` installs the local macOS command-line dependencies used by the automation.
 
-Installing OpenBSD on an UEFI system is possible but requires more steps, which I skipped in this case. You can write an email to `support@servetheworld.net` and ask them to "enable seaBIOS" for your VPS.
+This is intentionally hoster-specific and destructive. It writes an OpenBSD installer image to `/dev/sda` on the selected VPS and then installs OpenBSD to that machine.
 
-## What this repo does
+## Why not use a tool like Playwright
 
-To (mostly) automatically install OpenBSD on a servetheworld.net / stw.no x86 VPS, follow these steps:
+stw.no exposes the VPS console through a browser noVNC page, not a normal VNC endpoint. In this setup, noVNC automation only gives reliable browser-level control over an opaque `<canvas>`, not structured terminal text or a clean console API.
 
-1. Go to https://my.servetheworld.net/clientarea.php?action=services and select your server
-2. (Optional, if you bricked it already) Scroll to the middle and click the "Reinstallation" button to install Debian 13
-3. Wait for the reinstallation to finish and the new Debian 13 system to boot
-4. Edit the `flash-install-img.sh` and edit the variables according to the IP of your VPS and the latest stable OpenBSD release version
-5. Rename and edit the install.conf/test.privacy.fish.conf file - you need to host this file somewhere (you can push it to your own github account in a public repo so the installer can download it)
-6. Edit the `type-in-vnc.sh` and edit the variables according to the network information at the bottom of your VPS overview page
-7. Go to the stw.no overview page of your server and click on "noVNC Console"
-8. Watch the system to boot the OpenBSD installer until you get to `(I)nstall, (U)pgrade, (A)utoinstall or (Shell)?`
-   Sidenote: when the OpenBSD installer is at `boot>`, just pressing ENTER or waiting for it to auto-boot worked for me 99% of the time. Sometimes it does not find the disk to boot from, typing `boot hd0a:/bsd.rd` and pressing ENTER fixed this for me.
-9. With the VNC window still open in the browser, execute this script: `type-in-vnc.sh`, then immediately switch back to the VNC window. The script will then start typing the required things to automatically install OpenBSD.
-
-After that, OpenBSD finishes the install by itself and reboots, and you should be able to login via `ssh root@<your-ip>`
-
-## Why automate the installation in this hacky way
-
-We did not use Playwright for this noVNC installer flow because, in this specific hoster setup, it only gave us browser-level control over an opaque `<canvas>` rather than reliable access to the VM console itself: the noVNC page exposed no usable public API object, the terminal text inside the canvas was not readable as normal DOM text, whole-screen matching turned out too brittle, and even simple keyboard input had quirks like modifier-state leakage; in practice, that meant the Playwright solution still depended on hacky visual heuristics while adding a lot more code and moving parts, whereas a small shell script with fixed clicks, paste/keystrokes, and sleeps is simpler, easier to debug, and good enough until a more direct console automation method is available.
-
-The hoster exposes console access through a browser noVNC page, not a normal VNC endpoint. That makes clean automation annoying. The solution in this repo is intentionally simple and ugly:
-
-- flash the installer image remotely over SSH
-- reboot into the installer
-- use local desktop automation to interact with the noVNC browser window
-- hand off to OpenBSD `autoinstall` as early as possible
-
-It is not pretty, but it works.
+It is not pretty, but it keeps the moving parts small.
 
 ## Requirements
+
+### VPS
+
+- An x86 stw.no VPS.
+- A fresh Debian 13 installation booted on the VPS.
+- Root SSH access to that Debian system.
 
 ### Local machine
 
@@ -46,19 +31,114 @@ This currently assumes macOS.
 You need:
 
 - `bash`
+- `ssh` and `ssh-keygen`
+- GNU `timeout` from `coreutils`
 - `cliclick`
 - `pbcopy`
 - `say`
+- a browser with the stw.no noVNC console open
 
-Install `cliclick` with Homebrew: `brew install cliclick`
+Install the Homebrew dependencies:
 
-## Adapting these scripts for Linux workstations
+```sh
+./install.sh
+```
 
-The scripts in this repository were written for Mac OSX, but should be easily adapted to your Linux based workstations. If you want to adapt the local automation scripts for Ubuntu later, replace the macOS-specific tools with these rough equivalents:
+That installs:
 
-- `cliclick` -> `xdotool` (X11) or `ydotool` / `wtype` (Wayland)
-- `pbcopy` / `pbpaste` -> `xclip` / `xsel` (X11) or `wl-copy` / `wl-paste` (Wayland)
+```sh
+brew install coreutils cliclick
+```
+
+## Configure a target
+
+`setup-openbsd.sh` currently supports two target arguments:
+
+- `test`
+- `www`
+
+Each target block sets:
+
+- the VPS IPv4 address
+- the URL of the hosted OpenBSD `install.conf` response file
+
+The shared variables near the top of the script set:
+
+- `vps_netmask`
+- `vps_gateway`
+- `openbsd_version`
+- `openbsd_version_dot`
+
+Before using this for another VPS, update those values in `setup-openbsd.sh`.
+
+## Configure install.conf
+
+The response files live in:
+
+```text
+templates/install.conf/
+```
+
+Each file answers the OpenBSD installer prompts for one host, including:
+
+- hostname
+- `vio0` IPv4 address, netmask, gateway, and DNS
+- root password and root SSH public key
+- SSH daemon startup and root login policy
+- timezone
+- disk layout choice
+- install sets
+- X Window System choice
+
+Host the response file somewhere the OpenBSD installer can fetch over HTTP or HTTPS. The existing `test` and `www` targets use raw GitHub URLs for the files in this repository.
+
+If you create your own target, copy one of the template files, edit it for the VPS, publish it, and update the matching `install_conf_url` in `setup-openbsd.sh`.
+
+## Install OpenBSD
+
+1. In the stw.no control panel, select the VPS.
+2. If needed, use the reinstallation option to install Debian 13.
+3. Wait for Debian 13 to boot and confirm root SSH works:
+
+   ```sh
+   ssh root@<vps-ip>
+   ```
+
+4. Open the stw.no noVNC console for the VPS in your browser and keep the console visible.
+5. Run the script with the target name:
+
+   ```sh
+   ./setup-openbsd.sh test
+   ```
+
+   or:
+
+   ```sh
+   ./setup-openbsd.sh www
+   ```
+
+6. When macOS says it is waiting for the OpenBSD installer, switch focus back to the noVNC browser window.
+7. Do not use the keyboard, mouse, or clipboard while the script is typing into noVNC.
+
+
+## Troubleshooting
+
+If the OpenBSD boot prompt stops at `boot>`, regular Enter/auto-boot usually works. If the disk is not found, the command that worked during testing was:
+
+```text
+boot hd0a:/bsd.rd
+```
+
+The noVNC input path is fragile. The script uses fixed clicks, sleeps, clipboard paste, and typed commands because some characters such as `>`, `|`, and `:` are unreliable when typed directly through the browser console.
+
+If the automation misses the noVNC window, click/focus behavior or screen coordinates may need to be adjusted in `setup-openbsd.sh`.
+
+## Adapting to Linux workstations
+
+The scripts were written for macOS, but the approach can be adapted to Linux by replacing the local desktop automation tools:
+
+- `cliclick` -> `xdotool` on X11, or `ydotool` / `wtype` on Wayland
+- `pbcopy` / `pbpaste` -> `xclip` / `xsel` on X11, or `wl-copy` / `wl-paste` on Wayland
 - `say` -> `spd-say` or `espeak-ng`
-- `afplay` -> `paplay`, `aplay`, or `canberra-gtk-play`
 
-On Ubuntu, whether you are on X11 or Wayland matters a lot for input automation.
+Whether the desktop session uses X11 or Wayland matters a lot for input automation.
